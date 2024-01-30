@@ -1,0 +1,146 @@
+---
+
+- name: 'Подготовка временного списка компьютеров (вместо hosts)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: 'Настраиваем временную группу для удалённого компьютера {{ remote_ip }}'
+      ansible.builtin.add_host:
+        groups: temp
+        hostname: "{{ remote_ip }}"
+
+- name: 'Основная часть: Установка необходимых пакетов, копирование скриптов, включение расписания.'
+  hosts: "{{ hosts_group }}"
+  gather_facts: true
+  become: true
+  become_user: root
+
+  vars:
+    dummy: false
+
+    packages:
+      apt:
+        common:
+          - logrotate
+          - cron
+
+  tasks:
+
+    - name: 'Обновление кэша установщика пакетов'
+      ansible.builtin.apt:
+        update_cache: true
+
+    # - name: 'Обновление установщика пакетов'
+    #   ansible.builtin.apt:
+    #     upgrade: dist
+
+    - name: 'Установка пакетов вспомoгательных сервисов'
+      ansible.builtin.apt:
+        name: "{{ packages.apt.common }}"
+        state: present
+
+    - name: 'Передача файла скрипта detetсluster.sh в корень домашней папки пользователя {{ service_user }}'
+      ansible.builtin.copy:
+        src: "detectcluster.sh"
+        dest: "/home/{{ service_user }}/detectcluster.sh"
+        owner: "{{ service_user }}"
+        group: "{{ service_group }}"
+        mode: "0444"
+
+    - name: 'Передача файла скрипта purge1clogs.sh в корень домашней папки пользователя {{ service_user }}'
+      ansible.builtin.copy:
+        src: "purge1clogs.sh"
+        dest: "/home/{{ service_user }}/purge1clogs.sh"
+        owner: "{{ service_user }}"
+        group: "{{ service_group }}"
+        mode: "0444"
+
+    - name: 'Настройка logrotate для обслуживания журналов работы скрипта purge1clogs'
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/purge1clogs
+        content: |
+          /var/log/purge1clogs.log {
+            weekly
+            rotate 7
+            compress
+            missingok
+            create usr1cv8 grp1cv8
+            su usr1cv8 grp1cv8
+          }
+        mode: "0644"
+        owner: root
+        group: root
+
+    - name: 'Создание пустого журнала для скрипта purge1clogs с правами для пользователя {{ service_user }}'
+      ansible.builtin.copy:
+        dest: /var/log/purge1clogs.log
+        content: |
+          EMPTY LOG
+        mode: "0644"
+        owner: "{{ service_user }}"
+        group: "{{ service_group }}"
+
+# Первичный запуск скрипта detectcluster.sh (не забудьте проверить результат):
+    - name: 'Первичный запуск скрипта detectcluster.sh от имени пользователя {{ service_user }}'
+      become: true
+      become_user: "{{ service_user }}"
+      ansible.builtin.command:
+        cmd: >-
+          bash detectcluster.sh
+      args:
+        # executable: /bin/bash
+        chdir: "/home/{{ service_user }}/"
+      register: firstrun_result
+
+    - name: 'Результат первичного запуска скрипта detectcluster.sh'
+      ansible.builtin.debug:
+        var: firstrun_result.stdout_lines
+
+    # - name: Установка прав доступа на файл localbases.cfg'
+    #   ansible.builtin.file:
+    #     path: "/home/{{ service_user }}/localbases.cfg"
+    #     owner: "{{ service_user }}"
+    #     group: "{{ service_group }}"
+
+    - name: 'Запуск и включение сервиса logrotate'
+      ansible.builtin.systemd:
+        name: "logrotate"
+        state: started
+        enabled: true
+
+    # - name: 'Перезапуск сервиса logrotate для применения настроек'
+    #   ansible.builtin.service:
+    #     name: "logrotate"
+    #     state: reloaded
+
+    - name: 'Запуск и включение сервиса cron'
+      ansible.builtin.systemd:
+        name: "cron"
+        state: started
+        enabled: true
+
+    - name: 'Настройка cron: Добавление ежедневной очистки от имени пользователя {{ service_user }}}'
+      ansible.builtin.cron:
+        user: "{{ service_user }}"
+        name: "1C Bases Logs Purge Script run"
+        minute: "05"
+        hour: "00"
+        day: "*"
+        month: "*"
+        weekday: "*"
+        job: "bash ~/purge1clogs.sh"
+        state: present
+
+    - name: 'Настройка cron: Добавление еженедельного обнаружения баз от имени пользователя {{ service_user }}}'
+      ansible.builtin.cron:
+        user: "{{ service_user }}"
+        name: "1C Cluster and Bases Reveal Script run"
+        minute: "00"
+        hour: "00"
+        day: "*"
+        month: "*"
+        weekday: "0"
+        job: "bash ~/detectcluster.sh"
+        state: present

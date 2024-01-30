@@ -1,0 +1,8 @@
+[servers1c]
+#Test server 1
+192.168.222.111
+[others]
+# Demo server
+192.168.111.111
+# Test Sever 2
+192.168.222.222
